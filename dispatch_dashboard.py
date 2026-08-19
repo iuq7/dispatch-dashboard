@@ -882,8 +882,9 @@ def main():
     st.set_page_config(page_title="Dispatch", layout="wide")
     st.title("Dispatch")
 
-    if not DB_PATH.exists():
-        st.error(f"Database not found: {DB_PATH}. Run the notebook's ingestion cells first.")
+    missing = not DATA_DIR.is_dir() or not any(DATA_DIR.glob("*.parquet"))
+    if missing:
+        st.error(f"No Parquet tables in {DATA_DIR}. Run build_data.py to generate them.")
         st.stop()
 
     with st.sidebar:
