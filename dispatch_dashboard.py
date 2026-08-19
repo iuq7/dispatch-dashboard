@@ -54,14 +54,17 @@ def load_sales(start: str, end: str):
     s, e = f"{start} 00:00:00", f"{end} 23:59:59"
     engine = get_engine()
     with engine.connect() as conn:
+        # only the three columns the dashboard reads: SELECT t.* pulled 35
+        # columns and 1.15 GB for a row count, a mode, and an hourly pivot
         df_join = pd.read_sql(
             text('''
-                SELECT t.*, r.route_number,
-                       CAST(REPLACE(t.Amount, ',', '') AS REAL) AS Amount_numeric
+                SELECT t.cleaned_date, t.PRODUCT_DESCRIPTION, r.route_number
                 FROM ticket_sales t
                 LEFT JOIN route_kiosks r ON t."Terminal No" = r.terminal_no
                 WHERE t.cleaned_date BETWEEN :s AND :e
             '''), conn, params={"s": s, "e": e})
+        for col in ("PRODUCT_DESCRIPTION", "route_number"):
+            df_join[col] = df_join[col].astype("category")
 
         query_agg = """
             SELECT "{group_col}", PRODUCT_DESCRIPTION,
@@ -124,8 +127,11 @@ def hourly_matrix_from(df_join, product=None):
     df_h["hour"] = pd.to_datetime(df_h["cleaned_date"], errors="coerce").dt.hour
     df_h = df_h.dropna(subset=["hour"])
     hours = list(range(6, 24))
+    # route_number is categorical; pin observed=False so a later pandas default
+    # flip cannot silently drop unused routes from the matrix
     hm = df_h.pivot_table(index="route_number", columns="hour",
-                          values="PRODUCT_DESCRIPTION", aggfunc="count", fill_value=0)
+                          values="PRODUCT_DESCRIPTION", aggfunc="count", fill_value=0,
+                          observed=False)
     hm = hm[~hm.index.duplicated(keep="first")]
     hm = hm.loc[:, ~hm.columns.duplicated(keep="first")]
     hm = hm.reindex(columns=hours, fill_value=0)
