@@ -1,3 +1,17 @@
+"""Dispatch & Charging Analytics — single-file Streamlit dashboard.
+
+Standalone port of Charging Schedule-08.ipynb: pick a date range in the
+sidebar, press "Run Query", and every analysis the notebook produces is
+computed directly against the Parquet tables in data/ and rendered natively
+(no notebook execution underneath).
+
+Run with:
+    streamlit run dispatch_dashboard.py
+
+Requires data/*.parquet, queried through DuckDB. Regenerate them from
+AFC_BSS_Analytics.db with build_data.py.
+"""
+
 import io
 import json
 import math
@@ -20,6 +34,25 @@ TOWARDS_ISB = 0.65
 SOC_THRESHOLD_KM = 230.0
 
 sns.set_theme(style="whitegrid", palette="muted")
+
+# Match Streamlit's dark theme so matplotlib figures don't render as bright
+# white cards against the rest of the dashboard.
+_DARK_BG = "#0e1117"
+_DARK_FG = "#fafafa"
+plt.rcParams.update({
+    "figure.facecolor": _DARK_BG,
+    "axes.facecolor": _DARK_BG,
+    "savefig.facecolor": _DARK_BG,
+    "axes.edgecolor": _DARK_FG,
+    "axes.labelcolor": _DARK_FG,
+    "text.color": _DARK_FG,
+    "xtick.color": _DARK_FG,
+    "ytick.color": _DARK_FG,
+    "grid.color": "#31333f",
+    "legend.facecolor": _DARK_BG,
+    "legend.edgecolor": "#31333f",
+    "legend.labelcolor": _DARK_FG,
+})
 
 
 @st.cache_resource
@@ -100,23 +133,58 @@ def load_sales(start: str, end: str):
     return df_join, df_terminals, df_routes, df_users, df_regional
 
 
+TOP_N_CATEGORIES = 20
+
+
+def _clean_index(df):
+    """Whole-number float indices (e.g. terminal numbers read back as
+    10005.0) render with an ugly trailing '.0' on every axis tick — collapse
+    them to plain ints where safe."""
+    idx = df.index
+    if pd.api.types.is_float_dtype(idx) and (idx.dropna() % 1 == 0).all():
+        df = df.copy()
+        df.index = idx.astype("Int64").astype(str)
+    return df
+
+
 def product_pivot_chart(df, group_col, title):
     if df.empty:
         st.info(f"No data for {title}.")
         return
     pivot = df.pivot_table(index=group_col, columns="PRODUCT_DESCRIPTION",
                            values="total_sales", aggfunc="sum", fill_value=0)
-    fig, ax = plt.subplots(figsize=(12, 5))
-    pivot.plot(kind="bar", width=0.8, edgecolor="black", linewidth=0.5, ax=ax)
+    pivot = _clean_index(pivot)
+
+    if len(pivot) <= 1:
+        # Nothing to compare visually with a single category — show the
+        # numbers directly instead of a chart that's just two bars.
+        st.caption(f"{title} — single {group_col.replace('_', ' ').lower()}, showing totals only.")
+        st.dataframe(pivot.round(1))
+        return
+
+    plot_pivot = pivot
+    if len(pivot) > TOP_N_CATEGORIES:
+        totals = pivot.sum(axis=1).sort_values(ascending=False)
+        top = pivot.loc[totals.index[:TOP_N_CATEGORIES]]
+        other = pivot.loc[totals.index[TOP_N_CATEGORIES:]].sum()
+        other.name = f"Other ({len(pivot) - TOP_N_CATEGORIES})"
+        plot_pivot = pd.concat([top, other.to_frame().T])
+        st.caption(f"Showing top {TOP_N_CATEGORIES} of {len(pivot)} by total sales; "
+                   f"remainder grouped as '{other.name}'. Full breakdown in the table below.")
+
+    width = max(12, len(plot_pivot) * 0.4)
+    fig, ax = plt.subplots(figsize=(width, 5))
+    plot_pivot.plot(kind="bar", width=0.8, edgecolor="black", linewidth=0.5, ax=ax)
     ax.set_title(title, pad=15)
     ax.set_ylabel("Total Sales")
     ax.set_xlabel(group_col.replace("_", " ").title())
     ax.tick_params(axis="x", rotation=45)
+    ax.yaxis.set_major_formatter(lambda v, _: f"{v:,.0f}")
     ax.legend(title="Product Description", bbox_to_anchor=(1.05, 1), loc="upper left")
     fig.tight_layout()
     st.pyplot(fig)
     plt.close(fig)
-    st.dataframe(pivot)
+    st.dataframe(pivot.round(1))
 
 
 def hourly_matrix_from(df_join, product=None):
@@ -721,27 +789,46 @@ def render(start: str, end: str):
     st.subheader("Regional Sales (50 vs 90)")
     if not df_regional.empty:
         reg = df_regional.set_index("Terminal_No")[["total_sales_50", "total_sales_90", "total_sales_other"]]
-        fig, ax = plt.subplots(figsize=(14, 6))
-        reg.plot(kind="bar", stacked=True, ax=ax,
+        reg = _clean_index(reg)
+        reg_plot = reg
+        if len(reg) > TOP_N_CATEGORIES:
+            totals = reg.sum(axis=1).sort_values(ascending=False)
+            top = reg.loc[totals.index[:TOP_N_CATEGORIES]]
+            other = reg.loc[totals.index[TOP_N_CATEGORIES:]].sum()
+            other.name = f"Other ({len(reg) - TOP_N_CATEGORIES})"
+            reg_plot = pd.concat([top, other.to_frame().T])
+            st.caption(f"Showing top {TOP_N_CATEGORIES} of {len(reg)} terminals by total revenue; "
+                       f"remainder grouped as '{other.name}'. Full breakdown in the table below.")
+        width = max(14, len(reg_plot) * 0.4)
+        fig, ax = plt.subplots(figsize=(width, 6))
+        reg_plot.plot(kind="bar", stacked=True, ax=ax,
                  color=["#4C72B0", "#55A868", "#C44E52"], edgecolor="black")
         ax.set_title("Terminal-wise Revenue Breakdown (50 vs 90 vs Other)", pad=15)
         ax.set_ylabel("Total Revenue (PKR)")
         ax.tick_params(axis="x", rotation=45)
+        ax.yaxis.set_major_formatter(lambda v, _: f"{v:,.0f}")
         ax.legend(["50-Rupee Sales", "90-Rupee Sales", "Other Sales"],
                   bbox_to_anchor=(1.05, 1), loc="upper left")
         fig.tight_layout()
         st.pyplot(fig)
         plt.close(fig)
+        st.dataframe(reg.round(1))
 
         t50, t90 = df_regional["count_50"].sum(), df_regional["count_90"].sum()
-        if t50 > 0 or t90 > 0:
-            fig, ax = plt.subplots(figsize=(6, 6))
+        if t50 > 0 and t90 > 0:
+            fig, ax = plt.subplots(figsize=(4, 4))
             ax.pie([t50, t90], labels=["50-Rupee Tickets", "90-Rupee Tickets"],
                    autopct="%1.1f%%", colors=["#4C72B0", "#55A868"], startangle=90,
                    wedgeprops={"edgecolor": "black", "width": 0.4})
             ax.set_title("Overall Ticket Count Volume (50 vs 90)", pad=15)
-            st.pyplot(fig)
+            fig.tight_layout()
+            col, _ = st.columns([1, 2])
+            with col:
+                st.pyplot(fig, use_container_width=False)
             plt.close(fig)
+        elif t50 > 0 or t90 > 0:
+            only = "50-Rupee" if t50 > 0 else "90-Rupee"
+            st.caption(f"Only {only} tickets sold in this range ({int(t50 + t90)} total) — no split to chart.")
     else:
         st.info("No regional sales in range.")
 
@@ -789,7 +876,7 @@ def render(start: str, end: str):
             st.plotly_chart(fig2, use_container_width=True)
 
             st.subheader("KM Matrix")
-            st.dataframe(km_matrix)
+            st.dataframe(km_matrix.round(1))
 
     # ---------- SOC fleet ----------
     st.header("SOC Fleet Analysis")
@@ -812,9 +899,11 @@ def render(start: str, end: str):
             st.plotly_chart(fig2, use_container_width=True)
 
             st.subheader("Route Summary: Average KM per Bus")
-            st.dataframe(soc_matrix[["Avg_Km_Per_Bus"]])
+            avg_col, _ = st.columns([1, 2])
+            with avg_col:
+                st.dataframe(soc_matrix[["Avg_Km_Per_Bus"]].round(1))
             st.subheader("Full KM Matrix")
-            st.dataframe(soc_matrix)
+            st.dataframe(soc_matrix.round(1))
 
     # ---------- Route operations ----------
     st.header("Route Operations")
