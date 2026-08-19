@@ -443,11 +443,12 @@ def route_operational_summary(start: str, end: str):
     engine = get_engine()
     with engine.connect() as conn:
         stops_raw = pd.read_sql_query("""
-            SELECT r.route_code, rv.version_id, rv.file_timestamp, rs.stop_name
+            SELECT r.route_code, rv.version_id, rv.file_timestamp, rs.stop_order, rs.stop_name
             FROM routes_information r
             JOIN route_versions rv ON r.route_id = rv.route_id
             JOIN route_stops rs ON rv.version_id = rs.version_id
             WHERE r.directional_id LIKE '%-F' OR r.directional_id LIKE '%-B'
+            ORDER BY r.route_code, rv.file_timestamp, rv.version_id, rs.stop_order
         """, conn)
 
         routes_df = pd.read_sql("SELECT route_id, route_code FROM routes_information", conn)
@@ -459,12 +460,14 @@ def route_operational_summary(start: str, end: str):
 
     # --- latest stops per route ---
     stops_raw["clean_date"] = pd.to_datetime(stops_raw["file_timestamp"].apply(fix_flipped_january_date))
-    latest = (stops_raw.sort_values("clean_date").groupby("route_code")["version_id"].last().reset_index())
+    latest = (stops_raw.sort_values(["clean_date", "version_id"])
+              .groupby("route_code")["version_id"].last().reset_index())
     latest_stops = stops_raw.merge(latest, on=["route_code", "version_id"], how="inner")
-    stops_df = latest_stops.groupby("route_code").agg(
-        stop_count=("stop_name", "count"),
-        stops_name=("stop_name", lambda x: ", ".join(x.dropna().astype(str)))
-    ).reset_index()
+    stops_df = (latest_stops.sort_values(["route_code", "stop_order"])
+                .groupby("route_code").agg(
+                    stop_count=("stop_name", "count"),
+                    stops_name=("stop_name", lambda x: ", ".join(x.dropna().astype(str)))
+                ).reset_index())
 
     # --- route active duration ---
     dur = stops_raw.groupby("route_code")["clean_date"].agg(["min", "max"]).reset_index()
@@ -563,11 +566,12 @@ def phase3_synthesis(start: str, end: str):
             conn, params={"s": start, "e": end})
 
         stops_raw = pd.read_sql_query("""
-            SELECT r.route_code, rv.version_id, rv.file_timestamp, rs.stop_name
+            SELECT r.route_code, rv.version_id, rv.file_timestamp, rs.stop_order, rs.stop_name
             FROM routes_information r
             JOIN route_versions rv ON r.route_id = rv.route_id
             JOIN route_stops rs ON rv.version_id = rs.version_id
             WHERE r.directional_id LIKE '%-F' OR r.directional_id LIKE '%-B'
+            ORDER BY r.route_code, rv.file_timestamp, rv.version_id, rs.stop_order
         """, conn)
 
         dur_raw = pd.read_sql_query("""
@@ -624,12 +628,14 @@ def phase3_synthesis(start: str, end: str):
 
     # latest stops
     stops_raw["clean_date"] = pd.to_datetime(stops_raw["file_timestamp"].apply(_fix_flipped_jan_strict))
-    latest = stops_raw.sort_values("clean_date").groupby("route_code")["version_id"].last().reset_index()
+    latest = (stops_raw.sort_values(["clean_date", "version_id"])
+              .groupby("route_code")["version_id"].last().reset_index())
     latest_stops = stops_raw.merge(latest, on=["route_code", "version_id"], how="inner")
-    stops_df = latest_stops.groupby("route_code").agg(
-        stop_count=("stop_name", "count"),
-        stops_name=("stop_name", lambda x: ", ".join(x.dropna().astype(str)))
-    ).reset_index()
+    stops_df = (latest_stops.sort_values(["route_code", "stop_order"])
+                .groupby("route_code").agg(
+                    stop_count=("stop_name", "count"),
+                    stops_name=("stop_name", lambda x: ", ".join(x.dropna().astype(str)))
+                ).reset_index())
 
     # duration
     dur_raw["first_used_timestamp"] = pd.to_datetime(dur_raw["first_used_timestamp"].apply(_fix_flipped_jan_strict))
